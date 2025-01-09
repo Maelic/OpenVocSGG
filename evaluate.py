@@ -15,6 +15,8 @@ from dataloader import RelDataset
 
 import time
 
+from sklearn.metrics import precision_score, recall_score
+
 class SceneGraphEvaluation(ABC):
     def __init__(self):
         super().__init__()
@@ -28,11 +30,12 @@ class SceneGraphEvaluation(ABC):
         pass
 
 class BLIPScoreMatching(SceneGraphEvaluation):
-    def __init__(self):
+    def __init__(self, device="cuda"):
+        self.device = device
+
         from lavis.models import load_model_and_preprocess
         from lavis.processors import load_processor
         super(BLIPScoreMatching, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model, self.vis_processors, self.text_processors = load_model_and_preprocess("blip2_image_text_matching", "pretrain", device=self.device, is_eval=True)
 
         self.recall = []
@@ -53,7 +56,10 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         return result_str
     
     def preprocess_img(self, image):
-        img = self.vis_processors["eval"](image).unsqueeze(0).to(self.device)
+        try:
+            img = self.vis_processors["eval"](image).unsqueeze(0).to(self.device)
+        except:
+            return None
         return img
     
     def compute_similarity_batch(self, text, image, method='itm'):
@@ -102,7 +108,27 @@ class BLIPScoreMatching(SceneGraphEvaluation):
                 return None
         return scores
     
-    def calculate(self, preds, groundtruths, images):
+    def calculate(self, preds, images):
+        # compute only the blip score matching
+
+        for pred, union_img in zip(preds, images):
+            # PIL to tensor
+            image_features = self.preprocess_img(union_img)
+            if image_features is None:
+                self.recall.append(0)
+                self.precision.append(0)
+                return
+
+            # compute score for GT triplet:
+            pred_triplet = str(pred[0] + " " + pred[1] + " " + pred[2])
+
+            text_list = [pred_triplet]
+
+            scores = self.compute_similarity(text_list, image_features, method='itm')
+            
+            self.blip_score_matching.append(scores[0].item())
+    
+    def calculate_ref(self, preds, groundtruths, images):
         true_positives = 0
         false_positives = 0
         
@@ -114,6 +140,10 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         for pred, gt, union_img in zip(preds, groundtruths, images):
             # PIL to tensor
             image_features = self.preprocess_img(union_img)
+            if image_features is None:
+                self.recall.append(0)
+                self.precision.append(0)
+                return
 
             # compute score for GT triplet:
             gt_triplet = str(gt[0] + " " + gt[1] + " " + gt[2])
@@ -138,29 +168,29 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         self.precision.append(precision)
 
 class CLIPScoreMatching(SceneGraphEvaluation):
-    def __init__(self, model_name="siglip"):
+    def __init__(self, model_name="clip-large", device="cuda"):
         super(CLIPScoreMatching, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device
         #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-B-32', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/negCLIP.pt", device=self.device)
         #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-H-14', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/h14_v1.2_altogether.pt", device=self.device)
-
-        if model_name == "siglip":
-            model_name = "google/siglip-so400m-patch14-384"
-        elif model_name == "clip-large":
-            model_name = "openai/clip-vit-large-patch14"
-        elif model_name == "clip-base":
-            model_name = "openai/clip-vit-base-patch32"
+        self.model_name = model_name
+        if self.model_name == "siglip":
+            self.model_id = "google/siglip-so400m-patch14-384"
+        elif self.model_name == "clip-large":
+            self.model_id = "openai/clip-vit-large-patch14"
+        elif self.model_name == "clip-base":
+            self.model_id = "openai/clip-vit-base-patch32"
 
         # model_name = "google/siglip-so400m-patch14-384" # "openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"
         # model_name = "openai/clip-vit-large-patch14"
 
         self.processor = AutoProcessor.from_pretrained(
-            model_name,
+            self.model_id,
         )
-        torch_dtype = torch.float16
+        torch_dtype = torch.bfloat16
 
         self.model = AutoModel.from_pretrained(
-            model_name,
+            self.model_id,
             attn_implementation="flash_attention_2",
             device_map=self.device,
             torch_dtype=torch_dtype,
@@ -185,19 +215,30 @@ class CLIPScoreMatching(SceneGraphEvaluation):
         if type(text) == str:
             text = [text]
         inputs = self.processor(
-            text=text, images=image, return_tensors="pt", padding=True
+            text=text, images=image, return_tensors="pt", padding="max_length"
         ).to(self.device)
 
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-            image_features = outputs.image_embeds
-            text_features = outputs.text_embeds
+            if self.model_id == "google/siglip-so400m-patch14-384":
+                # logits = outputs.logits_per_image
+                # cos_scores = torch.sigmoid(logits)
+                image_features = outputs.image_embeds
+                text_features = outputs.text_embeds
 
-            image_features /= image_features.norm(dim=-1, keepdim=True)
-            text_features /= text_features.norm(dim=-1, keepdim=True)
+                image_features /= image_features.norm(dim=-1, keepdim=True)
+                text_features /= text_features.norm(dim=-1, keepdim=True)
 
-            cos_scores = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+                cos_scores = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+            else:
+                image_features = outputs.image_embeds
+                text_features = outputs.text_embeds
+
+                image_features /= image_features.norm(dim=-1, keepdim=True)
+                text_features /= text_features.norm(dim=-1, keepdim=True)
+
+                cos_scores = (100.0 * image_features @ text_features.T).softmax(dim=-1)
 
         return cos_scores[0].cpu()
     
@@ -275,13 +316,14 @@ def do_evaluation(dataset_name, model_name, max_samples, device, save=False):
 
     # data_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    evaluator = BLIPScoreMatching()
-    evaluator2 = CLIPScoreMatching()
+    evaluator = BLIPScoreMatching(device=device)
+    evaluator2 = CLIPScoreMatching(model_name="clip-large", device=device)
+    evaluator3 = CLIPScoreMatching(model_name="siglip", device=device)
 
     if model_name == 'phi3':
         model = Phi3Model(device=device)
     elif model_name == 'llama':
-        model = LlamaModel(device=device)
+        model = LlamaModel(device='cuda:0')
     elif model_name == 'llava':
         model = LLaVAModel(device=device)
     elif model_name == 'gpt4':
@@ -298,8 +340,18 @@ def do_evaluation(dataset_name, model_name, max_samples, device, save=False):
     avg_fps = 0
     avg_ms = 0
 
+    recall = []
+    precision = []
+
     for sample in tqdm(dataset):
         img_id, all_gt, all_imgs, all_orig_imgs = sample
+
+        # if all_orig_imgs[0] is an image with number of dim != 3, skip
+        if len(all_orig_imgs[0].getbands()) != 3:
+            print("Skipping image with number of channels != 3")
+            new_data[i]['relationships'] = []
+            i += 1
+            continue
 
         preds = []
         gt_preds = []
@@ -332,7 +384,7 @@ def do_evaluation(dataset_name, model_name, max_samples, device, save=False):
                     to_remove.append(j)
 
             j += 1
-        
+
         if save:
             # remove all elements in to_remove
             new_data[i]['relationships'] = [new_data[i]['relationships'][j] for j in range(len(new_data[i]['relationships'])) if j not in to_remove]
@@ -345,9 +397,18 @@ def do_evaluation(dataset_name, model_name, max_samples, device, save=False):
             continue
         evaluator.calculate(preds, gt_preds, all_orig_imgs)
         evaluator2.calculate(preds, gt_preds, all_orig_imgs)
+        evaluator3.calculate(preds, gt_preds, all_orig_imgs)
+
+        gt_preds = [gt[1] for gt in gt_preds]
+        preds = [pred[1] for pred in preds]
+        recall.append(recall_score(gt_preds, preds, average='micro'))
 
     print(evaluator.generate_print_string())
     print(evaluator2.generate_print_string())
+    print(evaluator3.generate_print_string())
+
+    # print overall recall and precision
+    print("Overall Recall: ", np.mean(recall))
 
     avg_fps /= len(dataset)
     avg_ms /= len(dataset)
@@ -367,7 +428,7 @@ def main():
     parser.add_argument('--model', type=str, default='gpt4', help='Model to use')
     parser.add_argument('--out_path', type=str, default='sampled_data_llava_CoT.json', help='Output file path')
     parser.add_argument('--max_samples', type=int, default=100, help='Maximum number of samples to evaluate')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to use')
+    parser.add_argument('--device', type=str, default='cuda:1', help='Device to use')
     args = parser.parse_args()
 
     do_evaluation(args.dataset, args.model, args.max_samples, args.device, save=True)

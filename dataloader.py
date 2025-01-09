@@ -7,13 +7,14 @@ coco_img_path = "/home/maelic/Documents/Datasets/coco/coco/"
 o365_path = "/home/maelic/Documents/OpenVocSGG/all_annotations/O365 (pseudo)/RLIPv2_o365trainval_Tagger2_Noi24_20e_Xattnmask_SceneGraph_model_large_caption_nucleus10_thre05_1234_4.json"
 
 o365_img_path = "/home/maelic/Documents/OpenVocSGG/object365/images/"
+obj365_filenames = "/home/maelic/Documents/OpenVocSGG/all_annotations/O365 (pseudo)/image_id_to_filepath.json"
 
 psg_path = "/home/maelic/Documents/OpenVocSGG/all_annotations/psg_full.json"
 
 PATH_CATALOG = {
     "VG": {'images': vg_img_path, 'data': vg_path},
     "COCO": {'images': coco_img_path, 'data': coco_path},
-    "OBJ365": {'images': o365_img_path, 'data': o365_path},
+    "OBJ365": {'images': o365_img_path, 'data': o365_path, 'filenames': obj365_filenames},
     "PSG": {'images': coco_img_path, 'data': psg_path},
     "VG150": {'images': vg_img_path, 'data': vg_path}
 }
@@ -44,27 +45,22 @@ class RelDataset(Dataset):
             json_data = json.load(f)
 
         data = []
-        data_img_ids = []
 
         images_path = PATH_CATALOG[self.dataset_name]['images']
         # create a list of all absolute image paths
         images_list = []
         if self.dataset_name == "OBJ365":
+            with open(PATH_CATALOG[self.dataset_name]['filenames'], 'r') as f:
+                obj365_filenames = json.load(f)
             data_path = os.path.join(images_path, split)
-            for d in json_data:
+            for d in tqdm(json_data):
                 if d['data_split'] == split:
                     data.append(d)
-                    data_img_ids.append(d['image_id'])
-            for img in os.listdir(data_path):
-                # extract the id from the path (number before .jpg)
-                img_id = img.split('.')[0]
-                # remove all charactres before the last '_'
-                img_id = img_id.split('_')[-1]
-                # remove all zeros in front of the id: 0003410 -> 3410
-                img_id = int(img_id)
-                if img_id not in data_img_ids:
-                    continue
-                images_list.append({'img_id': img_id, 'img_path' :os.path.join(data_path, img)})
+                    img_id = d['image_id']
+
+                    img_path = obj365_filenames[str(d['image_id'])]
+                    img_path = img_path.split('/')[-1]
+                    images_list.append({'img_id': img_id, 'img_path' :os.path.join(data_path, img_path)})
         elif self.dataset_name == "VG":
             for d in json_data:
                 if d['data_split'] == split:
@@ -79,6 +75,9 @@ class RelDataset(Dataset):
                 split = 'val2017'
             elif split == 'test':
                 split = 'test2017'
+
+            if self.dataset_name == "PSG" and split == 'test2017':
+                split = 'val2017'
             data_path = os.path.join(images_path, split)
             for d in json_data:
                 if d['data_split'] == split:
@@ -121,6 +120,10 @@ class RelDataset(Dataset):
 
             sub = objects[rel['subject_id']]
             obj = objects[rel['object_id']]
+
+            #  check if already in all_gt
+            if (sub['names'], rel['predicate'], obj['names']) in all_gt:
+                continue
 
             # crop the image to the union of the two boxes
             x1, y1, w1, h1 = [sub['x'], sub['y'], sub['w'], sub['h']]
@@ -198,15 +201,15 @@ class RelDataset(Dataset):
             # compute intersection for all pairs
             pairs = []
             for i in range(len(objects)):
-                for j in range(i+1, len(objects)):
+                for j in range(len(objects)):
                     if i == j:
                         continue
                     if intersection(objects[i]['bbox'], objects[j]['bbox']):
                         pairs.append((objects[i], objects[j]))
                         pairs.append((objects[j], objects[i]))
         else:
-            pairs = [(objects[i], objects[j]) for i in range(len(objects)) for j in range(i+1, len(objects)) if i != j]
-            pairs.extend([(objects[j], objects[i]) for i in range(len(objects)) for j in range(i+1, len(objects)) if i != j])
+            pairs = [(objects[i], objects[j]) for i in range(len(objects)) for j in range(len(objects)) if i != j]
+            pairs.extend([(objects[j], objects[i]) for i in range(len(objects)) for j in range(len(objects)) if i != j])
         
         img = Image.open(img_path)
 
@@ -275,6 +278,11 @@ class RelDataset(Dataset):
                 break
         pair = random.choice(pairs)
         return self.get_pair_data(img, pair, negative)
+    
+    def data_sampling(self, pairs, sampling, max_samples=50):
+        max_pairs = len(pairs)
+        num_pairs = min(int(max_pairs * sampling / 100), max_samples)
+        return random.sample(pairs, num_pairs)
 
     def visualize_box(self, img, box, label, color=(0, 0, 255)):
         # Convert PIL image to NumPy array

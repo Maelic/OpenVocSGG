@@ -8,18 +8,20 @@ from tqdm import tqdm
 import json
 
 import torch
+from evaluate import BLIPScoreMatching
 
 
-
-def data_sampling(pairs, sampling):
+def data_sampling(pairs, sampling, max_samples=50):
     max_pairs = len(pairs)
-    num_pairs = int(max_pairs * sampling / 100)
+    num_pairs = min(int(max_pairs * sampling / 100), max_samples)
     return random.sample(pairs, num_pairs)
 
-def generate_data(dataset, sampling, intersect, model, out_path='sampled_data.json'):
-    dataset = RelDataset(dataset, split='train', max_samples=100)
+def generate_data(dataset, sampling, intersect, model, max_samples=1000, out_path='sampled_data.json'):
+    dataset = RelDataset(dataset, split='train', max_samples=max_samples)
     print("Loading data for dataset ", dataset)
     data, img_data = dataset.get_data()
+
+    evaluator = BLIPScoreMatching()
 
     rel_id = 0
     num_pairs = 0
@@ -37,11 +39,16 @@ def generate_data(dataset, sampling, intersect, model, out_path='sampled_data.js
     pbar = tqdm(total=len(data))
     new_data = data.copy()
 
-    for i, (sample, img_d) in enumerate(zip(data, img_data)):
+    for i in range(len(new_data)):
         new_data[i]['relationships'] = []
+
+    for i, (sample, img_d) in enumerate(zip(data, img_data)):
         img, pairs = dataset.get_sample(sample, img_d['img_path'], intersect)
         pairs = data_sampling(pairs, sampling)
         num_pairs += len(pairs)
+        preds_accumulate = []
+        img_accumulate = []
+
         for pair in pairs:
             img_neg, img_cropped, img3, labels, bboxes = dataset.get_pair_data(img, pair)
 
@@ -71,7 +78,8 @@ def generate_data(dataset, sampling, intersect, model, out_path='sampled_data.js
 
             CoT_template = "Analyze and describe the directed visual relationship between two entities in an image, focusing on Entity 1 as the subject and Entity 2 as the object. Entity 1 is represented by the blue bounding box, while Entity 2 is the red bounding box. Follow these refined steps:\n\n1. **Entity Identification**  \n   - Clearly identify each entity's visual characteristics within the image. Note attributes such as shape, size, and position, alongside any distinguishing features.\n\n2. **Spatial Context**  \n   - Analyze the positioning of the entities relative to each other. Consider aspects like distance, orientation, and whether entities overlap or are close in proximity.\n\n3. **Functional Context**  \n   - Assess any potential functional interactions. Identify actions or roles that may indicate how Entity 1 impacts or interacts with Entity 2.\n\n4. **Integrative Reasoning**  \n   - Determine whether the relationship is predominantly spatial or functional. Use the analysis from steps 1-3 to support your reasoning and articulate it in a concise sentence.\n\nFinally, summarize the visual relationship in the format: `<sub>Entity 1</sub> <rel>relationship</rel> <obj>Entity 2</obj>`. Example: `<sub>1_person</sub> <rel>holding</rel> <obj>2_phone</obj>`.\n\n# Output Format\n\n- Provide your response as a structured sentence summarizing the relationship, followed by the formatted statement. \n\n# Notes\n\n- Ensure that the reasoning provided is comprehensive and ties together observations from all steps.\n- Consider both tangible interactions and abstract spatial nuances when formulating the result. \n Now, predict <rel></rel> for <sub>"+labels[0]+"</sub> and <obj>"+labels[1]+"</obj> based on this image."
 
-            predicate, _ = model.generate(labels, img_cropped, image_negative=img_neg)
+            predicate, _ = model.generate(labels, img_cropped)
+
             if predicate != None:
                 rel_id += 1
                 new_data[i]['relationships'].append({
@@ -82,23 +90,34 @@ def generate_data(dataset, sampling, intersect, model, out_path='sampled_data.js
                     'confidence': 1.0
                 })
                 pbar.set_description(f"Rels gen: {rel_id} / {num_pairs}")
+                triplet = labels[0] + " " + predicate + " " + labels[1]
+
+                preds_accumulate.append(triplet)
+                img_accumulate.append(img_cropped)
+        evaluator.calculate(preds_accumulate, img_accumulate)
+
+        # save every 50 images
+        if i % 50 == 0:
             with open(out_path, 'w') as f:
                 json.dump(new_data, f)
+            print(evaluator.generate_print_string())
         pbar.update(1)
 
     print("Number of relationships:", rel_id)
+    print(evaluator.generate_print_string())
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='COCO', help='Dataset to use')
-    parser.add_argument('--sampling', type=int, default=50, help='Number of percent of data to sample')
+    parser.add_argument('--sampling', type=int, default=25, help='Number of percent of data to sample')
     parser.add_argument('--intersect', type=bool, default=True, help='Only sample pairs that intersect')
     parser.add_argument('--model', type=str, default='llama', help='Model to use')
-    parser.add_argument('--out_path', type=str, default='sampled_data_llava_base.json', help='Output file path')
+    parser.add_argument('--out_path', type=str, default='/home/maelic/Documents/OpenVocSGG/generated_data/sampled_data_gpt4_obj365.json', help='Output file path')
+    parser.add_argument('--max_samples', type=int, default=1000, help='Max number of samples to use')
     args = parser.parse_args()
 
-    generate_data(args.dataset, args.sampling, args.intersect, args.model, args.out_path)
+    generate_data(args.dataset, args.sampling, args.intersect, args.model, args.max_samples, args.out_path)
 
 if __name__ == '__main__':
     main()
