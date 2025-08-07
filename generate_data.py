@@ -1,5 +1,5 @@
 from dataloader import RelDataset
-from models import Phi3Model, LlamaModel, LLaVAModel, GPT4Model, Qwen2VLModel
+from models import Phi3Model, LlamaModel, LLaVAModel, GPT4Model, Qwen2VLModel, InternVLModel
 
 import argparse
 import random
@@ -8,7 +8,7 @@ from tqdm import tqdm
 import json
 
 import torch
-from evaluate import BLIPScoreMatching
+from evaluate import BLIPScoreMatching, CLIPScoreMatching
 
 
 def data_sampling(pairs, sampling, max_samples=50):
@@ -17,11 +17,12 @@ def data_sampling(pairs, sampling, max_samples=50):
     return random.sample(pairs, num_pairs)
 
 def generate_data(dataset, sampling, intersect, model, max_samples=1000, out_path='sampled_data.json'):
-    dataset = RelDataset(dataset, split='train', max_samples=max_samples)
+    dataset = RelDataset(dataset, split='train', max_samples=max_samples, masks=False)
     print("Loading data for dataset ", dataset)
     data, img_data = dataset.get_data()
 
-    evaluator = BLIPScoreMatching()
+    evaluator = CLIPScoreMatching(model_name='negclip') # None # BLIPScoreMatching()
+    evaluator2 = CLIPScoreMatching(model_name='clip-large') # None # BLIPScoreMatching()
 
     rel_id = 0
     num_pairs = 0
@@ -35,6 +36,8 @@ def generate_data(dataset, sampling, intersect, model, max_samples=1000, out_pat
         model = GPT4Model()
     elif model == 'qwen2vl':
         model = Qwen2VLModel()
+    elif model == 'internvl':
+        model = InternVLModel()
 
     pbar = tqdm(total=len(data))
     new_data = data.copy()
@@ -62,13 +65,12 @@ def generate_data(dataset, sampling, intersect, model, max_samples=1000, out_pat
             1. **Entity Position**: Briefly describe the location of each entity in the image (e.g., top-left, center-right).\n
             \n
             2. **Predicate Selection**: Determine the most accurate direct relative position between the two entities. Use only one of the following predicates:\n
-            - **Under**: Entity 1 is completely or partially below Entity 2 along the vertical axis.\n
+            - **Below**: Entity 1 is completely or partially below Entity 2 along the vertical axis.\n
             - **Above**: Entity 1 is completely or partially above Entity 2 along the vertical axis.\n
             - **To the right of**: Entity 1 is horizontally positioned to the right of Entity 2, with no significant vertical overlap.\n
             - **To the left of**: Entity 1 is horizontally positioned to the left of Entity 2, with no significant vertical overlap.\n
             - **Behind**: Entity 1 appears farther back in depth relative to Entity 2 (based on image perspective or occlusion).\n
             - **In front of**: Entity 1 appears closer in depth relative to Entity 2 (based on image perspective or occlusion).\n
-            - **Inside**: Entity 1 is fully or mostly enclosed within the spatial boundaries of Entity 2.\n
             \n
             3. **Reasoning**: Provide a concise explanation for your choice, considering both spatial arrangement and perspective.\n
             \n
@@ -90,22 +92,26 @@ def generate_data(dataset, sampling, intersect, model, max_samples=1000, out_pat
                     'confidence': 1.0
                 })
                 pbar.set_description(f"Rels gen: {rel_id} / {num_pairs}")
-                triplet = labels[0] + " " + predicate + " " + labels[1]
+                triplet = [labels[0], predicate, labels[1]]
 
-                preds_accumulate.append(triplet)
-                img_accumulate.append(img_cropped)
-        evaluator.calculate(preds_accumulate, img_accumulate)
+                # preds_accumulate.append(triplet)
+                # img_accumulate.append(img_cropped)
+                if evaluator is not None: evaluator.calculate(triplet, None, img3)
+                if evaluator2 is not None: evaluator2.calculate(triplet, None, img3)
 
         # save every 50 images
         if i % 50 == 0:
             with open(out_path, 'w') as f:
                 json.dump(new_data, f)
-            print(evaluator.generate_print_string())
+            if evaluator is not None: print(evaluator.generate_print_string())
+            if evaluator2 is not None: print(evaluator2.generate_print_string())
         pbar.update(1)
 
     print("Number of relationships:", rel_id)
-    print(evaluator.generate_print_string())
-
+    if evaluator is not None: print(evaluator.generate_print_string())
+    if evaluator2 is not None: print(evaluator2.generate_print_string())
+    with open(out_path, 'w') as f:
+        json.dump(new_data, f)
 
 def main():
     parser = argparse.ArgumentParser()

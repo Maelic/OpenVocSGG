@@ -1,35 +1,17 @@
 import torch
 import numpy as np
-import json
 from tqdm import tqdm
 
 from abc import ABC, abstractmethod
 
-from collections import Counter
-from transformers import AutoProcessor, AutoModel, Blip2ForImageTextRetrieval, AutoTokenizer
-
-from models import GPT4Model, Phi3Model, LlamaModel, LLaVAModel, PaliGemmaModel, Qwen2VLModel, PEModel, InternVLModel
+from transformers import AutoProcessor, AutoModel, Blip2ForImageTextRetrieval, AddedToken, BitsAndBytesConfig, AutoTokenizer
+from utils import SAMProcessor
 
 import argparse
 from dataloader import RelDataset
 
-import time, os
-
-from sklearn.metrics import precision_score, recall_score, accuracy_score
-
-import torch.nn.functional as F
-
-class SceneGraphEvaluation(ABC):
-    def __init__(self):
-        super().__init__()
- 
-    @abstractmethod
-    def generate_print_string(self, mode):
-        print("Generate Print String")
-        pass
-
-    def calculate(self, global_container, local_container, mode):
-        pass
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 class SceneGraphEvaluation(ABC):
     def __init__(self):
@@ -168,19 +150,17 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         self.precision.append(precision)
     
     def calculate(self, gt, pred, union_img):
-        
+        if len(pred) == 0:
+            return
 
         gt_triplet = str(gt[0] + " " + gt[1] + " " + gt[2])
 
-        if pred is not None:
-            # if there are predictions, compute the score for the GT triplet and the first prediction
-            pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
-            text_list = [gt_triplet] + pred_triplet
-        else:
-            # if there are no predictions, compute the score for the GT triplet only
-            text_list = [gt_triplet]
+        pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
+
+        text_list = [gt_triplet] + pred_triplet
 
         scores = self.compute_similarity(text_list, union_img, method=self.method)
+        
 
         # get rank of gt triplet
         _, indices = torch.sort(scores, descending=True)
@@ -193,12 +173,7 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         else:
             self.false_positives += 1
         
-        if pred is not None:
-            # if there are predictions, append the score of the first prediction
-            self.blip_score_matching.append(scores[1].item())
-        else:
-            # if there are no predictions, append the score of the GT triplet
-            self.blip_score_matching.append(scores[0].item())
+        self.blip_score_matching.append(scores[0].item())
 
         return scores
     
@@ -214,6 +189,7 @@ class SIGLIPScoreMatching(SceneGraphEvaluation):
             self.model_id = "google/siglip2-so400m-patch14-384"
 
 
+        bnb_config = BitsAndBytesConfig(load_in_4bit=True)
         self.model = AutoModel.from_pretrained(self.model_id, device_map="auto",  attn_implementation="sdpa").eval()
         self.processor = AutoProcessor.from_pretrained(self.model_id)
 
@@ -249,7 +225,7 @@ class SIGLIPScoreMatching(SceneGraphEvaluation):
         if image.mode != "RGB":
             image = image.convert("RGB")
        
-        # texts = [f'This is a photo of a {label}.' for label in text]
+        #text = [f'This is a photo of a {label}.' for label in text]
 
         inputs = self.processor(text=text, images=image, padding="max_length", max_length=64, return_tensors="pt").to("cuda")
 
@@ -268,21 +244,17 @@ class SIGLIPScoreMatching(SceneGraphEvaluation):
             return np.log(max_position - position + 1) / np.log(max_position + 1)
     
     def calculate(self, gt, pred, union_img):
+        if len(pred) == 0:
+            return
+
         # compute score for GT triplet:
         gt_triplet = str(gt[0] + " " + gt[1] + " " + gt[2])
 
-        if pred is not None:
-            if not isinstance(pred, list):
-                pred = [pred]
-            
-            pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
+        pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
 
-            text_list = [gt_triplet] + pred_triplet
+        text_list = [gt_triplet] + pred_triplet
 
-            scores = self.compute_similarity(text_list, union_img)
-        else:
-            text_list = [gt_triplet]
-            scores = self.compute_similarity(text_list, union_img)
+        scores = self.compute_similarity(text_list, union_img)
 
         # normalize the scores between 0 and 1
         # scores = (scores - scores.min()) / (scores.max() - scores.min())
@@ -299,13 +271,7 @@ class SIGLIPScoreMatching(SceneGraphEvaluation):
             self.true_positives += 1
         else:
             self.false_positives += 1
-
-        if pred is not None:
-            # if there are predictions, append the score of the first prediction
-            self.clip_score_matching.append(scores[1].item())
-        else:
-            # if there are no predictions, append the score of the GT triplet
-            self.clip_score_matching.append(scores[0].item())
+        self.clip_score_matching.append(scores[0].item())
 
         # to list
         scores = scores.cpu().to(torch.float32)  
@@ -321,15 +287,13 @@ class CLIPScoreMatching(SceneGraphEvaluation):
         if self.model_name == "siglip":
             self.model_id = "google/siglip-so400m-patch14-384"
         elif self.model_name == "clip-large":
-            self.model_id = "openai/clip-vit-large-patch14" #"Nano1337/negclip"
+            self.model_id = "openai/clip-vit-large-patch14"
+            # self.model_id = "Nano1337/negclip"
+            # self.model_id = "TripletCLIP/CC12M_TripletCLIP_ViTB12"
         elif self.model_name == "clip-base":
             self.model_id = "openai/clip-vit-base-patch32"
         elif self.model_name == "negclip":
             self.model_id = "Nano1337/negclip"
-
-
-        # model_name = "google/siglip-so400m-patch14-384" # "openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"
-        # model_name = "openai/clip-vit-large-patch14"
 
         if self.model_id == "Nano1337/negclip":
             # use open_clip to load the model
@@ -373,7 +337,6 @@ class CLIPScoreMatching(SceneGraphEvaluation):
     
         result_str = 'SGG eval: '
         result_str += '    CLIP Score Matching: %.4f; ' % np.mean(self.clip_score_matching)
-        result_str += '    CLIP REFCLIP Score Matching: %.4f; ' % np.mean(self.refclip_score_matching)
         result_str += '    CLIP STD: %.4f; ' % np.std(self.clip_score_matching)
         result_str += '    CLIP PRECISION: %.4f; ' % precision
         result_str += '    CLIP NUMBER OF GT MATCHES: %s; ' % str(self.true_positives) + " / " + str(len(self.clip_score_matching))
@@ -386,20 +349,41 @@ class CLIPScoreMatching(SceneGraphEvaluation):
         if type(text) == str:
             text = [text]
         # for images in greyscale
-        # if image.mode != "RGB":
-        #     image = image.convert("RGB")
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
-        cos_scores = torch.zeros((len(text),), dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            for i, t in enumerate(text):
+        new_eval = False
+        if new_eval:
+            cos_scores = torch.zeros((len(text),), dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                for i, t in enumerate(text):
+                    inputs_img = self.processor(images=image, return_tensors="pt").to(self.device)
+                    inputs_txt = self.tokenizer(t, padding=True, return_tensors="pt").to(self.device)
+
+                    txt_feat = self.model.get_text_features(**inputs_txt)
+                    image_features = self.model.get_image_features(**inputs_img)
+
+                    txt_feat = txt_feat / txt_feat.norm(
+                        dim=1, keepdim=True).to(torch.float32)
+                    image_features = image_features / image_features.norm(
+                        dim=1, keepdim=True).to(torch.float32)
+
+                    # calculate score
+                    score = (image_features * txt_feat).sum().unsqueeze(0)
+                    cos_scores[i] = score
+
+            cos_scores = cos_scores.unsqueeze(0)
+        else:
+
+            with torch.no_grad():
                 if self.model_id == "Nano1337/negclip":
-                    img = self.preprocess(image).unsqueeze(0)
-                    te = self.tokenizer(t)
-                    image_features = self.model.encode_image(img)
-                    text_features = self.model.encode_text(te)
+                    image = self.preprocess(image).unsqueeze(0)
+                    text = self.tokenizer(text)
+                    image_features = self.model.encode_image(image)
+                    text_features = self.model.encode_text(text)
                 else:
                     inputs = self.processor(
-                        text=t, images=image, return_tensors="pt", padding="max_length"
+                        text=text, images=image, return_tensors="pt", padding="max_length"
                     ).to(self.device)
                     outputs = self.model(**inputs)
 
@@ -409,13 +393,9 @@ class CLIPScoreMatching(SceneGraphEvaluation):
                 image_features /= image_features.norm(dim=-1, keepdim=True)
                 text_features /= text_features.norm(dim=-1, keepdim=True)
 
-                # calculate score
-                # score = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+                cos_scores = (100.0 * image_features @ text_features.T).softmax(dim=-1)
 
-                score = (image_features * text_features).sum()
-
-                cos_scores[i] = score
-        return cos_scores.cpu()
+        return cos_scores[0].cpu()
     
     def weight_function(self, position, max_position, mode="linear"):
         if mode == "linear":
@@ -424,25 +404,17 @@ class CLIPScoreMatching(SceneGraphEvaluation):
             return np.log(max_position - position + 1) / np.log(max_position + 1)
     
     def calculate(self, gt, pred, union_img):
-        # if len(pred) == 0 and pred != None:
-        #     return
+        if len(pred) == 0:
+            return
 
         # compute score for GT triplet:
         gt_triplet = str(gt[0] + " " + gt[1] + " " + gt[2])
 
-        if pred is not None:
-            pred_triplet = str(pred[0] + " " + pred[1] + " " + pred[2])
-            text_list = [gt_triplet, pred_triplet]
-            scores = self.compute_similarity(text_list, union_img)
-        else:
-            scores = self.compute_similarity(gt_triplet, union_img)
+        pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
 
-        # else:
-        #     pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
+        text_list = [gt_triplet] + pred_triplet
 
-        #     text_list = [gt_triplet] + pred_triplet
-
-        #     scores = self.compute_similarity(text_list, union_img)
+        scores = self.compute_similarity(text_list, union_img)
         
         # get rank of gt triplet
         _, indices = torch.sort(scores, descending=True)
@@ -454,55 +426,11 @@ class CLIPScoreMatching(SceneGraphEvaluation):
             self.true_positives += 1
         else:
             self.false_positives += 1
-
-        if pred is not None:
-            # compute refclip score
-            # refclip score is the similarity between the GT triplet and the predicted triplet
-            scores_text = self.compute_similarity_text(gt_triplet, pred_triplet, union_img)
-
-            refclipscores = 2 * scores[0] * scores_text[0] / (scores[0] + scores_text[0])
-
-            self.refclip_score_matching.append(refclipscores.item())
-            self.clip_score_matching.append(scores[1].item())
-        else:
-            self.clip_score_matching.append(scores[0].item())
-
+        self.clip_score_matching.append(scores[0].item())
 
         # to list
         scores = scores.cpu().to(torch.float32)  
         return scores
-    
-    def compute_similarity_text(self, text1, text2, image=None):
-        with torch.no_grad():
-            if self.model_id == "Nano1337/negclip":
-                te = self.tokenizer(text1)
-                text_features1 = self.model.encode_text(te)
-                te = self.tokenizer(text2)
-                text_features2 = self.model.encode_text(te)
-
-            else:
-                inputs = self.processor(
-                    text=text1, images=image, return_tensors="pt", padding="max_length"
-                ).to(self.device)
-                outputs = self.model(**inputs)
-
-                text_features1 = outputs.text_embeds
-
-                inputs = self.processor(
-                    text=text2, images=image, return_tensors="pt", padding="max_length"
-                ).to(self.device)
-                outputs = self.model(**inputs)
-
-                text_features2 = outputs.text_embeds
-
-            text_features1 /= text_features1.norm(dim=-1, keepdim=True)
-            text_features2 /= text_features2.norm(dim=-1, keepdim=True)
-            #     score = (image_features * text_features).sum().unsqueeze(0)
-            #     cos_scores[i] = score
-
-        score = 100 * (text_features1 * text_features2).sum(axis=-1)
-
-        return score.cpu()
 
 class PEScoreMatching(SceneGraphEvaluation):
     def __init__(self, device="cuda"):
@@ -513,7 +441,7 @@ class PEScoreMatching(SceneGraphEvaluation):
 
         # CLIP configs: ['PE-Core-G14-448', 'PE-Core-L14-336', 'PE-Core-B16-224']
 
-        self.model = pe.CLIP.from_config("PE-Core-L14-336", pretrained=True)  # Downloads from HF
+        self.model = pe.CLIP.from_config("PE-Core-G14-448", pretrained=True)  # Downloads from HF
         self.model = self.model.cuda()
 
         self.preprocess = transforms.get_image_transform(self.model.image_size)
@@ -546,13 +474,28 @@ class PEScoreMatching(SceneGraphEvaluation):
 
     def compute_similarity(self, text, image):
         image = self.preprocess(image).unsqueeze(0).cuda()
-        text = self.tokenizer(text).cuda()
 
         with torch.no_grad(), torch.autocast("cuda"):
-            image_features, text_features, logit_scale = self.model(image, text)
-            text_probs = (logit_scale * image_features @ text_features.T).softmax(dim=-1)
+            cos_scores = torch.zeros((len(text),), dtype=torch.float32, device=self.device)
+            for i, t in enumerate(text):
+                te = self.tokenizer(t).cuda()
+                image_features, txt_feat, _ = self.model(image, te)
 
-        return text_probs[0].cpu()
+                txt_feat = txt_feat / txt_feat.norm(
+                        dim=1, keepdim=True).to(torch.float32)
+                image_features = image_features / image_features.norm(
+                    dim=1, keepdim=True).to(torch.float32)
+
+                # calculate score
+                score = (image_features * txt_feat).sum().unsqueeze(0)
+                cos_scores[i] = score
+
+            # cos_scores = cos_scores.unsqueeze(0)
+
+            #image_features, text_features, logit_scale = self.model(image, text)
+            #text_probs = (logit_scale * image_features @ text_features.T).softmax(dim=-1)
+
+        return cos_scores.cpu()
     
     def calculate(self, gt, pred, union_img):
         
@@ -578,191 +521,114 @@ class PEScoreMatching(SceneGraphEvaluation):
             self.true_positives += 1
         else:
             self.false_positives += 1
-        self.clip_score_matching.append(scores[1].item())
+        self.clip_score_matching.append(scores[0].item())
 
         return scores.cpu().numpy()
 
-def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False, save=False):
-    dataset = RelDataset(dataset_name, max_samples=max_samples, split='train', negative=False, masks=False)
+def do_evaluation(dataset_name, max_samples, device):
+    dataset = RelDataset(dataset_name, max_samples=max_samples, split='train', negative=False)
+
+    save = True
+    save_dir = 'eval_alignment_3'
 
     # data_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    evaluators = [CLIPScoreMatching(model_name='negclip', device=device), 
-                   SIGLIPScoreMatching(model_name="siglip", device=device),
-                CLIPScoreMatching(model_name='clip-large', device=device),
-                # BLIPScoreMatching(device=device),
-                # SIGLIPScoreMatching(model_name="siglip", device=device)
-            ] #PEScoreMatching(device=device), 
-    #, CLIPScoreMatching(model_name="clip-large", device=device)
+    evaluators = [
+        CLIPScoreMatching(model_name="clip-large", device=device),
+        # SIGLIPScoreMatching(model_name="siglip", device=device),
+        # SIGLIPScoreMatching(model_name="siglip", device=device),
+        # BLIPScoreMatching(device=device),
+        #PEScoreMatching(device=device)
+    ] #, BLIPScoreMatching(device=device) # , CLIPScoreMatching(model_name='siglip')
     # evaluator2 = CLIPScoreMatching(model_name="clip-large", device=device)
     # evaluator3 = CLIPScoreMatching(model_name="siglip", device=device)
 
-    if model_name != '':
-        if model_name == 'phi3':
-            model = Phi3Model(device=device)
-        elif model_name == 'llama':
-            model = LlamaModel(device=device)
-        elif model_name == 'llava':
-            model = LLaVAModel(device=device)
-        elif model_name == 'gpt4':
-            model = GPT4Model(model_id = 'gpt-4o-mini', device=device)
-        elif model_name == 'gwen2vl':
-            model = Qwen2VLModel(device=device)
-        elif model_name == 'paligemma':
-            model = PaliGemmaModel(device=device)
-        elif model_name == 'perception_encoder':
-            model = PEModel(device=device)
-        elif model_name == 'internvl':
-            model = InternVLModel(device=device)
+    #sam_processor = SAMProcessor(device='cuda')
 
     if save:
-        new_data = dataset.data.copy()
-        i=0
+        for evaluator in evaluators:
+            # create directory if it does not exist
+            import os
+            dir = save_dir + '/' + evaluator.__class__.__name__
+            if not os.path.exists(dir):
+                os.makedirs(dir)
 
-    avg_fps = 0
-    avg_ms = 0
-
-    recall = []
-    precision = []
-
-    eval_ratios = []
-
-    p = 0
+    possible_preds = dataset.get_possible_predicates()
 
     for sample in tqdm(dataset):
-        img_id, all_gt, all_cropped, all_imgs, all_boxes, all_ratios = sample
-
-        if len(all_imgs) == 0:
-            # print("Skipping image with no rels")
-            continue
-
-        # if all_orig_imgs[0] is an image with number of dim != 3, skip
-        if len(all_imgs[0].getbands()) != 3:
-            print("Skipping image with number of channels != 3")
-            if save: 
-                new_data[i]['relationships'] = []
-                i += 1
-            continue
-
-        preds = []
-        gt_preds = []
-        to_remove = []
-        
-        j = 0
-        for gt, img_cropped, img_base, ratios in zip(all_gt, all_cropped, all_imgs, all_ratios):
+        img_id, all_gt, all_cropped, all_imgs, all_boxes, _ = sample
+        for i, (gt, img_cropped, img_base, boxes) in enumerate(zip(all_gt, all_cropped, all_imgs, all_boxes)):
             sub_label, rel_label, obj_label = gt
 
-            CoT_template = "Analyze and describe the directed visual relationship between two entities in an image, focusing on Entity 1 as the subject and Entity 2 as the object. Entity 1 is represented by the blue bounding box, while Entity 2 is the red bounding box. Follow these refined steps:\n\n1. **Entity Identification**  \n   - Clearly identify each entity's visual characteristics within the image. Note attributes such as shape, size, and position, alongside any distinguishing features.\n\n2. **Spatial Context**  \n   - Analyze the positioning of the entities relative to each other. Consider aspects like distance, orientation, and whether entities overlap or are close in proximity.\n\n3. **Functional Context**  \n   - Assess any potential functional interactions. Identify actions or roles that may indicate how Entity 1 impacts or interacts with Entity 2.\n\n4. **Integrative Reasoning**  \n   - Determine whether the relationship is predominantly spatial or functional. Use the analysis from steps 1-3 to support your reasoning and articulate it in a concise sentence.\n\nFinally, summarize the visual relationship in the format: `<sub>Entity 1</sub> <rel>relationship</rel> <obj>Entity 2</obj>`. Example: `<sub>1_person</sub> <rel>holding</rel> <obj>2_phone</obj>`.\n\n# Output Format\n\n- Provide your response as a structured sentence summarizing the relationship, followed by the formatted statement. \n\n# Notes\n\n- Ensure that the reasoning provided is comprehensive and ties together observations from all steps.\n- Consider both tangible interactions and abstract spatial nuances when formulating the result. \n Now, predict <rel></rel> for <sub>"+sub_label+"</sub> and <obj>"+obj_label+"</obj> based on this image."
-            t_start = time.time()
+            # print info on the PIL image
+            #img_with_masks = sam_processor.generate_masks(img_base, boxes, cropping=True, annotate=True)
 
-            if model_name != '':
-                predicate, _ = model.generate((sub_label, obj_label), img_cropped)
+            # sub_label = sub_label.split("_")[-1]
+            # obj_label = obj_label.split("_")[-1]
+
+            sub_label_f = sub_label +'_1'
+            obj_label_f = obj_label +'_2'
+
+            if possible_preds[(sub_label, obj_label)] != [rel_label]:
+                preds = possible_preds[(sub_label, obj_label)]
+                if rel_label in preds:
+                    preds.remove(rel_label)
+                all_triplets = [(sub_label_f, p, obj_label_f) for p in preds]
+                gt_pred = (sub_label_f, rel_label, obj_label_f)
             else:
-                predicate = rel_label
-            t_end = time.time()
-
-            ms = t_end - t_start
-            avg_ms += ms
-            avg_fps += 1 / 1 #(t_end - t_start)
-
-            sub_label = sub_label.split("_")[-1]
-            obj_label = obj_label.split("_")[-1]
-
-            if predicate is not None:
-                for evaluator in evaluators:
-                    if not eval_only:
-                        scores = evaluator.calculate((sub_label, rel_label, obj_label), (sub_label, predicate, obj_label), img_base)
-                        eval_ratios.append((ratios, scores[0].item()))
-                    else:
-                        scores = evaluator.calculate((sub_label, predicate, obj_label), None, img_base)
-                        eval_ratios.append((ratios, scores[0].item()))
-                preds.append((sub_label, predicate, obj_label))
-                gt_preds.append((sub_label, rel_label, obj_label))
+                continue
+            
+            for evaluator in evaluators:
+                scores = evaluator.calculate(gt_pred, all_triplets, img_base)
 
                 if save:
-                    new_data[i]['relationships'][j]['predicate'] = predicate
-            else:
-                if save:
-                    # remove new_data[i]['relationships'][j]
-                    to_remove.append(j)
+                    if i == 1:
+                        all_pred = [gt_pred[1]]
+                        all_pred = all_pred + [p[1] for p in all_triplets]
+                        assert len(all_pred) == len(scores), "Scores and predictions length mismatch"
 
-            j += 1
-        #     p += 1
-        
-        # if p >= 100:
-        #     print("Skipping image with too many relationships")
-        #     break
+                        # sort the scores and predicates by score
+                        sorted_indices = scores.argsort()
+                        scores = scores[sorted_indices]
+                        all_pred = np.array(all_pred)[sorted_indices]
 
-        if save:
-            # remove all elements in to_remove
-            new_data[i]['relationships'] = [new_data[i]['relationships'][j] for j in range(len(new_data[i]['relationships'])) if j not in to_remove]
-            i += 1
+                        # display a chart which represents the scores for each predicate
+                        # the x-axis is the predicate, the y-axis is the score
+                        sns.set_theme(style="whitegrid")
+                        plt.figure(figsize=(10, 5))
+                        # combine the chart with the image cropped img to form a single image, the cropped img is on the left and the chart is on the right, keeping aspect ratio of img_cropped
+                        fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+                        ax[0].imshow(img_cropped)
+                        ax[0].axis('off')
+                        
+                        ax[1].plot(all_pred, scores, color='blue')
+                        # add the score for each point, show also the point 'o'
+                        for j, score in enumerate(scores):
+                            # make the text rotated 75 deg
+                            ax[1].text(j, score, f"{score:.2f}", fontsize=10, rotation=75, ha='center', va='bottom')
+                        ax[1].scatter(range(len(all_pred)), scores, color='blue', marker='o')
 
-        # convert all_imgs from PIL format to json serializable format
-        #all_imgs = [img.tobytes().decode("latin1") for img in all_imgs]
-
-        if len(gt_preds) == 0:
-            continue
-
-        gt_preds = [gt[1] for gt in gt_preds]
-        preds = [pred[1] for pred in preds]
-        recall.append(accuracy_score(gt_preds, preds))
-
-        # for gt, p, r in zip(gt_preds, preds, all_ratios):
-        #     if gt == p:
-        #         eval_ratios.append((r, 1))
-        #     else:
-        #         eval_ratios.append((r, 0))
+                        ax[1].set_xlabel('Predicate')
+                        ax[1].set_ylabel('Score')
+                        # ax[1].set_title('GT: ' + gt_pred[0] + ' ' + gt_pred[1] + ' ' + gt_pred[2] + ' | Rank: ' + str(np.where(all_pred == gt_pred[1])[0][0] + 1) + ' / ' + str(len(all_pred)))
+                        ax[1].set_xticks(range(len(all_pred)))
+                        ax[1].set_xticklabels(all_pred, rotation=75)
+                        plt.tight_layout()
+                        d = save_dir + '/' + evaluator.__class__.__name__
+                        plt.savefig(f"{d}/Img_{img_id}.png")
+                        plt.close()
 
     for evaluator in evaluators:
         print(evaluator.generate_print_string())
-
-    # print overall recall and precision
-    print("Overall Accuracy: ", np.mean(recall))
-
-    avg_fps /= len(dataset)
-    avg_ms /= len(dataset)
-
-    print("Average FPS: ", avg_fps)
-    print("Average ms: ", avg_ms)
-
-    if not os.path.exists("evaluation/"+model_name):
-        os.makedirs("evaluation/"+model_name)
-    # save all data
-    if save:
-        file_name = "evaluation/"+model_name+"/test_prompt1_"+dataset_name+"_"+model_name+".json"
-        with open(file_name, "w") as f:
-            json.dump(new_data, f)
-
-    # # use eval_ratios to plot a curve of accuracy vs ratio
-    # eval_ratios = np.array(eval_ratios)
-    # ratios = eval_ratios[:, 0]
-    # clipscores = eval_ratios[:, 1]
-
-    # import matplotlib.pyplot as plt
-    # import seaborn as sns
-    # # draw a line plot of clipscores vs ratio
-    # plt.figure(figsize=(10, 6))
-    # sns.lineplot(x=ratios, y=clipscores, ci='sd', marker='o', linestyle='-')
-    # plt.xlabel('Ratio')
-    # plt.ylabel('CLIP Score')
-    # plt.title('CLIP Score vs Ratio')
-    # plt.grid()
-    # plt.savefig("evaluation/"+model_name+"/test_prompt1_"+dataset_name+"_"+model_name+"_eval_ratios.png")
-    # plt.close()
-    
             
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='PSG', help='Dataset to use')
-    parser.add_argument('--model', type=str, default='', help='Model to use')
-    parser.add_argument('--out_path', type=str, default='sampled_data_llava_CoT.json', help='Output file path')
-    parser.add_argument('--max_samples', type=int, default=1000, help='Maximum number of samples to evaluate')
+    parser.add_argument('--max_samples', type=int, default=10000, help='Maximum number of samples to evaluate')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use')
-    parser.add_argument('--eval_only', type=str, default=False, help='Eval only flag')
     args = parser.parse_args()
 
-    do_evaluation(args.dataset, args.model, args.max_samples, args.device, args.eval_only, save=False)
+    do_evaluation(args.dataset, args.max_samples, args.device)
 
 if __name__ == '__main__':
     main()

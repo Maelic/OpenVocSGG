@@ -3,3 +3,15 @@ generated_data/*
 llama3_2_hf/*
 object365/*
 output/*
+
+# pycache
+
+__pycache__/*
+eval_alignment/*
+eval_alignment_2/*
+eval_alignment_3/*
+evaluation/*
+jobs/*
+logs/*
+RLIPv2/*
+data/*
