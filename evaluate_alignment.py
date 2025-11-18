@@ -5,10 +5,10 @@ from tqdm import tqdm
 from abc import ABC, abstractmethod
 
 from transformers import AutoProcessor, AutoModel, Blip2ForImageTextRetrieval, AddedToken, BitsAndBytesConfig, AutoTokenizer
-from utils import SAMProcessor
+from models.utils import SAMProcessor
 
 import argparse
-from dataloader import RelDataset
+from data.dataloader import RelDataset
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -281,8 +281,6 @@ class CLIPScoreMatching(SceneGraphEvaluation):
     def __init__(self, model_name="clip-large", device="cuda"):
         super(CLIPScoreMatching, self).__init__()
         self.device = device
-        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-B-32', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/negCLIP.pt", device=self.device)
-        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-H-14', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/h14_v1.2_altogether.pt", device=self.device)
         self.model_name = model_name
         if self.model_name == "siglip":
             self.model_id = "google/siglip-so400m-patch14-384"

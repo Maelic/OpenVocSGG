@@ -298,7 +298,6 @@ class Phi3Model(BaseModel):
 class LlamaModel(BaseModel):
     def __init__(self, device=None):
         super().__init__("neuralmagic/Llama-3.2-11B-Vision-Instruct-FP8-dynamic", device)
-        # model_id = "/home/maelic/Documents/OpenVocSGG/llama3_2_hf"
         from vllm import LLM, SamplingParams
 
         self.model = LLM(model=self.model_id, max_num_seqs=1, enforce_eager=True)
@@ -329,8 +328,7 @@ class LlamaModel(BaseModel):
     
 class LlamaModel2(BaseModel):
     def __init__(self, device=None):
-        super().__init__("/home/maelic/Documents/OpenVocSGG/llama3_2_hf", device)
-        # model_id = "/home/maelic/Documents/OpenVocSGG/llama3_2_hf"
+        super().__init__("./llama3_2_hf", device)
 
         self.model = MllamaForConditionalGeneration.from_pretrained(
             self.model_id,

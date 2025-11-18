@@ -11,7 +11,7 @@ from transformers import AutoProcessor, AutoModel, Blip2ForImageTextRetrieval, A
 from models import GPT4Model, Phi3Model, LlamaModel, LLaVAModel, PaliGemmaModel, Qwen2VLModel, PEModel, InternVLModel
 
 import argparse
-from dataloader import RelDataset
+from data.dataloader import RelDataset
 
 import time, os
 
@@ -66,13 +66,6 @@ class BLIPScoreMatching(SceneGraphEvaluation):
         self.false_positives = 0
 
         self.new_rel_score = []
-
-        # self.processor.num_query_tokens = self.model.config.num_query_tokens
-        # image_token = AddedToken("<image>", normalized=False, special=True)
-        # self.processor.tokenizer.add_tokens([image_token], special_tokens=True)
-
-        # self.model.resize_token_embeddings(len(self.processor.tokenizer), pad_to_multiple_of=64) # pad for efficient computation
-        # self.model.config.image_token_index = len(self.processor.tokenizer) - 1
 
     def generate_print_string(self):
         # compute recall and precision
@@ -249,7 +242,7 @@ class SIGLIPScoreMatching(SceneGraphEvaluation):
         if image.mode != "RGB":
             image = image.convert("RGB")
        
-        # texts = [f'This is a photo of a {label}.' for label in text]
+        # texts = [f'This is a photo of a {label}.' for label in text] <-- this does not significantly improve results, even though it should???
 
         inputs = self.processor(text=text, images=image, padding="max_length", max_length=64, return_tensors="pt").to("cuda")
 
@@ -315,8 +308,8 @@ class CLIPScoreMatching(SceneGraphEvaluation):
     def __init__(self, model_name="clip-large", device="cuda"):
         super(CLIPScoreMatching, self).__init__()
         self.device = device
-        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-B-32', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/negCLIP.pt", device=self.device)
-        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-H-14', pretrained="/home/maelic/Documents/PhD/MyModel/SGG-Benchmark/h14_v1.2_altogether.pt", device=self.device)
+        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-B-32', pretrained="negCLIP.pt", device=self.device)
+        #self.clip_model, _, self.preprocess =  open_clip.create_model_and_transforms('ViT-H-14', pretrained="h14_v1.2_altogether.pt", device=self.device)
         self.model_name = model_name
         if self.model_name == "siglip":
             self.model_id = "google/siglip-so400m-patch14-384"
@@ -326,10 +319,6 @@ class CLIPScoreMatching(SceneGraphEvaluation):
             self.model_id = "openai/clip-vit-base-patch32"
         elif self.model_name == "negclip":
             self.model_id = "Nano1337/negclip"
-
-
-        # model_name = "google/siglip-so400m-patch14-384" # "openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"
-        # model_name = "openai/clip-vit-large-patch14"
 
         if self.model_id == "Nano1337/negclip":
             # use open_clip to load the model
@@ -436,13 +425,6 @@ class CLIPScoreMatching(SceneGraphEvaluation):
             scores = self.compute_similarity(text_list, union_img)
         else:
             scores = self.compute_similarity(gt_triplet, union_img)
-
-        # else:
-        #     pred_triplet = [str(p[0] + " " + p[1] + " " + p[2]) for p in pred]
-
-        #     text_list = [gt_triplet] + pred_triplet
-
-        #     scores = self.compute_similarity(text_list, union_img)
         
         # get rank of gt triplet
         _, indices = torch.sort(scores, descending=True)
@@ -467,8 +449,6 @@ class CLIPScoreMatching(SceneGraphEvaluation):
         else:
             self.clip_score_matching.append(scores[0].item())
 
-
-        # to list
         scores = scores.cpu().to(torch.float32)  
         return scores
     
@@ -623,11 +603,8 @@ def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False
     avg_ms = 0
 
     recall = []
-    precision = []
 
     eval_ratios = []
-
-    p = 0
 
     for sample in tqdm(dataset):
         img_id, all_gt, all_cropped, all_imgs, all_boxes, all_ratios = sample
@@ -652,7 +629,6 @@ def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False
         for gt, img_cropped, img_base, ratios in zip(all_gt, all_cropped, all_imgs, all_ratios):
             sub_label, rel_label, obj_label = gt
 
-            CoT_template = "Analyze and describe the directed visual relationship between two entities in an image, focusing on Entity 1 as the subject and Entity 2 as the object. Entity 1 is represented by the blue bounding box, while Entity 2 is the red bounding box. Follow these refined steps:\n\n1. **Entity Identification**  \n   - Clearly identify each entity's visual characteristics within the image. Note attributes such as shape, size, and position, alongside any distinguishing features.\n\n2. **Spatial Context**  \n   - Analyze the positioning of the entities relative to each other. Consider aspects like distance, orientation, and whether entities overlap or are close in proximity.\n\n3. **Functional Context**  \n   - Assess any potential functional interactions. Identify actions or roles that may indicate how Entity 1 impacts or interacts with Entity 2.\n\n4. **Integrative Reasoning**  \n   - Determine whether the relationship is predominantly spatial or functional. Use the analysis from steps 1-3 to support your reasoning and articulate it in a concise sentence.\n\nFinally, summarize the visual relationship in the format: `<sub>Entity 1</sub> <rel>relationship</rel> <obj>Entity 2</obj>`. Example: `<sub>1_person</sub> <rel>holding</rel> <obj>2_phone</obj>`.\n\n# Output Format\n\n- Provide your response as a structured sentence summarizing the relationship, followed by the formatted statement. \n\n# Notes\n\n- Ensure that the reasoning provided is comprehensive and ties together observations from all steps.\n- Consider both tangible interactions and abstract spatial nuances when formulating the result. \n Now, predict <rel></rel> for <sub>"+sub_label+"</sub> and <obj>"+obj_label+"</obj> based on this image."
             t_start = time.time()
 
             if model_name != '':
@@ -687,7 +663,6 @@ def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False
                     to_remove.append(j)
 
             j += 1
-        #     p += 1
         
         # if p >= 100:
         #     print("Skipping image with too many relationships")
@@ -708,12 +683,6 @@ def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False
         preds = [pred[1] for pred in preds]
         recall.append(accuracy_score(gt_preds, preds))
 
-        # for gt, p, r in zip(gt_preds, preds, all_ratios):
-        #     if gt == p:
-        #         eval_ratios.append((r, 1))
-        #     else:
-        #         eval_ratios.append((r, 0))
-
     for evaluator in evaluators:
         print(evaluator.generate_print_string())
 
@@ -733,24 +702,6 @@ def do_evaluation(dataset_name, model_name, max_samples, device, eval_only=False
         file_name = "evaluation/"+model_name+"/test_prompt1_"+dataset_name+"_"+model_name+".json"
         with open(file_name, "w") as f:
             json.dump(new_data, f)
-
-    # # use eval_ratios to plot a curve of accuracy vs ratio
-    # eval_ratios = np.array(eval_ratios)
-    # ratios = eval_ratios[:, 0]
-    # clipscores = eval_ratios[:, 1]
-
-    # import matplotlib.pyplot as plt
-    # import seaborn as sns
-    # # draw a line plot of clipscores vs ratio
-    # plt.figure(figsize=(10, 6))
-    # sns.lineplot(x=ratios, y=clipscores, ci='sd', marker='o', linestyle='-')
-    # plt.xlabel('Ratio')
-    # plt.ylabel('CLIP Score')
-    # plt.title('CLIP Score vs Ratio')
-    # plt.grid()
-    # plt.savefig("evaluation/"+model_name+"/test_prompt1_"+dataset_name+"_"+model_name+"_eval_ratios.png")
-    # plt.close()
-    
             
 def main():
     parser = argparse.ArgumentParser()
