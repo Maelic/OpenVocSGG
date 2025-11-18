@@ -18,3 +18,7 @@ data/*
 
 # SLURM files
 SLURM*.sh
+
+# Figures and paper
+Figures/
+paper/
