@@ -14,7 +14,6 @@ evaluation/*
 jobs/*
 logs/*
 RLIPv2/*
-data/*
 
 # SLURM files
 SLURM*.sh
